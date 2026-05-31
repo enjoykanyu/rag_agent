@@ -1,0 +1,33 @@
+sources:
+  local:
+    path: "./docs/sample_docs"
+    patterns:
+      - "**/*.md"
+      - "**/*.txt"
+  upload:
+    enabled: true
+    allowed_extensions:
+      - ".md"
+      - ".txt"
+
+rag:
+  chunk_size: 512
+  chunk_overlap: 64
+  top_k: 5
+  embedding: "ollama"
+  ollama_embedding_model: "bge-m3"
+
+agent:
+  refuse_when_no_context: true
+  system_prompt: "你是一个基于知识库的智能问答助手。请严格根据检索到的上下文内容回答问题，不要编造信息。回答必须使用 Markdown 格式，结构清晰，包含标题、列表、代码块等。如果知识库中没有相关内容，请明确回复「知识库中未找到相关信息」。每条回答必须附带引用来源，格式如 [1] [2]。"
+  llm:
+    provider: "openai"
+    model: "mimo-v2.5-pro"
+    api_key: "sk-s6cbqpl48g3ruajjrj5qo0defx8wiow41dt60eq16xo8iaql"
+    base_url: "https://api.xiaomimimo.com/v1"
+    temperature: 0.3
+    max_tokens: 2048
+
+ui:
+  show_citations: true
+  title: "多源文档智能问答 Agent"

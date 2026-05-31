@@ -1,0 +1,289 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+import re
+import time
+from typing import Any, AsyncGenerator, Literal
+
+from langgraph.graph import END, START, StateGraph
+from pydantic import BaseModel, Field
+
+from src.config import AppConfig
+from src.pipeline.rag_pipeline import RAGPipeline
+from src.pipeline.vector_store import RetrievalResult
+
+logger = logging.getLogger(__name__)
+
+
+class Citation(BaseModel):
+    index: int
+    source: str
+    document_name: str = ""
+    section: str = ""
+    snippet: str
+    score: float
+
+
+class GraphState(BaseModel):
+    question: str = ""
+    conversation_history: list[dict[str, str]] = Field(default_factory=list)
+
+    # retrieve
+    retrieved_chunks: list[RetrievalResult] = Field(default_factory=list)
+
+    # rerank
+    reranked_chunks: list[RetrievalResult] = Field(default_factory=list)
+    context_text: str = ""
+    citations: list[Citation] = Field(default_factory=list)
+
+    # think
+    thinking: str = ""
+    thinking_ms: int = 0
+    should_answer: bool = True
+
+    # generate
+    answer: str = ""
+    has_context: bool = True
+    follow_up_hint: str = ""
+
+    class Config:
+        arbitrary_types_allowed = True
+
+
+def create_rag_graph(config: AppConfig, pipeline: RAGPipeline) -> StateGraph:
+
+    def retrieve_node(state: GraphState) -> dict[str, Any]:
+        results = pipeline.retrieve(state.question, top_k=config.rag.top_k * 2)
+        return {"retrieved_chunks": results}
+
+    def rerank_node(state: GraphState) -> dict[str, Any]:
+        chunks = state.retrieved_chunks
+        if not chunks:
+            return {"reranked_chunks": [], "context_text": "", "citations": []}
+
+        query = state.question.lower()
+        query_unigrams = set(re.findall(r'[\u4e00-\u9fff]|[a-z]+|[0-9]+', query))
+        query_bigrams = set()
+        chars = re.findall(r'[\u4e00-\u9fff]', query)
+        for i in range(len(chars) - 1):
+            query_bigrams.add(chars[i] + chars[i + 1])
+        query_words = set(re.findall(r'[a-z]+|[0-9]+', query))
+
+        scored: list[tuple[float, RetrievalResult]] = []
+        for r in chunks:
+            doc_text = r.chunk.content.lower()
+
+            unigrams = set(re.findall(r'[\u4e00-\u9fff]|[a-z]+|[0-9]+', doc_text))
+            bigrams = set()
+            doc_chars = re.findall(r'[\u4e00-\u9fff]', doc_text)
+            for i in range(len(doc_chars) - 1):
+                bigrams.add(doc_chars[i] + doc_chars[i + 1])
+            doc_words = set(re.findall(r'[a-z]+|[0-9]+', doc_text))
+
+            uni_overlap = len(query_unigrams & unigrams) / max(len(query_unigrams), 1)
+            bi_overlap = len(query_bigrams & bigrams) / max(len(query_bigrams), 1)
+            word_overlap = len(query_words & doc_words) / max(len(query_words), 1)
+
+            text_score = 0.2 * uni_overlap + 0.5 * bi_overlap + 0.3 * word_overlap
+            combined = 0.35 * r.score + 0.65 * text_score
+            scored.append((combined, r))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        top = scored[: config.rag.top_k]
+
+        citations: list[Citation] = []
+        context_parts: list[str] = []
+        for i, (score, r) in enumerate(top, 1):
+            source = r.chunk.source
+            doc_name = r.chunk.metadata.get("document_name", source)
+            section = r.chunk.metadata.get("section", "")
+            snippet = r.chunk.content[:400]
+            section_label = f" > {section}" if section else ""
+            context_parts.append(f"[{i}] 来源: {doc_name}{section_label}\n{snippet}")
+            citations.append(Citation(
+                index=i,
+                source=source,
+                document_name=doc_name,
+                section=section,
+                snippet=r.chunk.content[:200],
+                score=round(score, 4),
+            ))
+
+        return {
+            "reranked_chunks": [r for _, r in top],
+            "context_text": "\n\n".join(context_parts),
+            "citations": citations,
+        }
+
+    def think_node(state: GraphState) -> dict[str, Any]:
+        t0 = time.time()
+        chunks = state.reranked_chunks
+
+        if not chunks or (chunks and chunks[0].score < 0.3):
+            if config.agent.refuse_when_no_context:
+                thinking = (
+                    f"分析用户问题: 「{state.question}」\n\n"
+                    f"检索结果: 共检索到 {len(chunks)} 个文本块，"
+                    f"最高相关度 {chunks[0].score if chunks else 0:.4f}，低于阈值。\n\n"
+                    f"结论: 知识库中未找到与该问题相关的内容，无法基于知识库回答。"
+                )
+                return {
+                    "thinking": thinking,
+                    "thinking_ms": int((time.time() - t0) * 1000),
+                    "should_answer": False,
+                    "has_context": False,
+                    "answer": "知识库中未找到相关信息，无法回答该问题。",
+                    "follow_up_hint": "您可以尝试换一种方式提问，或上传相关文档到知识库。",
+                }
+
+        top_sources = [c.source for c in state.citations[:3]]
+        top_scores = [f"[{c.index}]{c.document_name}" + (f" > {c.section}" if c.section else "") + f"({c.score:.3f})" for c in state.citations[:3]]
+        thinking = (
+            f"分析用户问题: 「{state.question}」\n\n"
+            f"检索与重排序: 从向量库召回 {len(state.retrieved_chunks)} 个文本块，"
+            f"经关键词重排序后选取 Top-{len(chunks)} 个最相关结果。\n\n"
+            f"最相关来源:\n"
+        )
+        for ts in top_scores:
+            thinking += f"  - {ts}\n"
+        thinking += f"\n结论: 知识库中有足够的相关信息，可以基于检索内容生成带引用的回答。"
+
+        return {
+            "thinking": thinking,
+            "thinking_ms": int((time.time() - t0) * 1000),
+            "should_answer": True,
+            "has_context": True,
+        }
+
+    def generate_node(state: GraphState) -> dict[str, Any]:
+        if not state.should_answer:
+            return {}
+
+        system = config.agent.system_prompt
+        history_text = ""
+        if state.conversation_history:
+            parts: list[str] = []
+            for msg in state.conversation_history[-4:]:
+                role = "用户" if msg["role"] == "user" else "助手"
+                parts.append(f"{role}: {msg['content']}")
+            history_text = f"\n\n对话历史:\n{''.join(parts)}"
+
+        prompt = (
+            f"以下是检索到的上下文内容:\n\n{state.context_text}\n\n"
+            f"请严格根据以上上下文回答问题。要求:\n"
+            f"1. 使用 Markdown 格式组织回答，包括标题(##/###)、列表、代码块、表格等\n"
+            f"2. 回答要准确、完整，结构清晰，直接回答问题\n"
+            f"3. 在相关事实后标注引用来源编号，格式如 [1] [2]，引用标记放在句末\n"
+            f"4. 代码示例使用 ```language 代码块格式\n"
+            f"5. 如果上下文中没有足够信息，请明确说明\n\n"
+            f"问题: {state.question}{history_text}"
+        )
+
+        answer = _call_llm_sync(config, system, prompt, state.conversation_history)
+
+        follow_up = ""
+        if len(state.conversation_history) <= 2:
+            follow_up = "如果您想进一步了解，可以继续追问。"
+
+        return {"answer": answer, "follow_up_hint": follow_up}
+
+    def route_after_think(state: GraphState) -> Literal["generate", END]:
+        if state.should_answer:
+            return "generate"
+        return END
+
+    builder = StateGraph(GraphState)
+    builder.add_node("retrieve", retrieve_node)
+    builder.add_node("rerank", rerank_node)
+    builder.add_node("think", think_node)
+    builder.add_node("generate", generate_node)
+
+    builder.add_edge(START, "retrieve")
+    builder.add_edge("retrieve", "rerank")
+    builder.add_edge("rerank", "think")
+    builder.add_conditional_edges("think", route_after_think)
+    builder.add_edge("generate", END)
+
+    return builder.compile()
+
+
+def _call_llm_sync(config: AppConfig, system: str, prompt: str, history: list[dict[str, str]]) -> str:
+    llm_cfg = config.agent.llm
+    if llm_cfg.api_key:
+        try:
+            from openai import OpenAI
+            client = OpenAI(api_key=llm_cfg.api_key, base_url=llm_cfg.base_url or None)
+            messages = [{"role": "system", "content": system}]
+            messages.extend(history)
+            messages.append({"role": "user", "content": prompt})
+            response = client.chat.completions.create(
+                model=llm_cfg.model,
+                messages=messages,
+                temperature=llm_cfg.temperature,
+                max_tokens=llm_cfg.max_tokens,
+            )
+            return response.choices[0].message.content or ""
+        except Exception as e:
+            logger.error("LLM call failed: %s", e)
+            return _fallback_answer(prompt)
+    return _fallback_answer(prompt)
+
+
+async def stream_llm_answer(
+    config: AppConfig, system: str, prompt: str, history: list[dict[str, str]]
+) -> AsyncGenerator[str, None]:
+    llm_cfg = config.agent.llm
+    if llm_cfg.api_key:
+        try:
+            from openai import AsyncOpenAI
+            client = AsyncOpenAI(api_key=llm_cfg.api_key, base_url=llm_cfg.base_url or None)
+            messages = [{"role": "system", "content": system}]
+            messages.extend(history)
+            messages.append({"role": "user", "content": prompt})
+            stream = await client.chat.completions.create(
+                model=llm_cfg.model,
+                messages=messages,
+                temperature=llm_cfg.temperature,
+                max_tokens=llm_cfg.max_tokens,
+                stream=True,
+            )
+            async for chunk in stream:
+                delta = chunk.choices[0].delta
+                if delta.content:
+                    yield delta.content
+        except Exception as e:
+            logger.error("LLM stream failed: %s", e)
+            for token in _fallback_answer(prompt):
+                yield token
+    else:
+        for token in _fallback_answer(prompt):
+            yield token
+
+
+def _fallback_answer(prompt: str) -> str:
+    context_marker = "以下是检索到的上下文内容:"
+    context_section = prompt.split(context_marker)
+    if len(context_section) < 2:
+        return "知识库中未找到相关信息。"
+    context = context_section[1].split("请严格根据以上上下文回答问题")[0]
+    question_part = prompt.split("问题:")[-1].strip() if "问题:" in prompt else ""
+    if "对话历史:" in question_part:
+        question_part = question_part.split("对话历史:")[0].strip()
+
+    sources: list[str] = []
+    content_lines: list[str] = []
+    for line in context.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("[") and "] 来源:" in line:
+            sources.append(line)
+        elif not line.startswith("["):
+            content_lines.append(line)
+
+    if content_lines:
+        summary = " ".join(content_lines[:6])
+        refs = " ".join([f"[{i}]" for i in range(1, min(len(sources) + 1, 4))])
+        return f"根据知识库中的信息，关于「{question_part}」：\n\n{summary}\n\n以上内容参考了相关文档资料 {refs}。"
+    return "知识库中未找到相关信息。"
