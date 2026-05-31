@@ -61,7 +61,35 @@ class AppConfig(BaseModel):
     ui: UIConfig = Field(default_factory=UIConfig)
 
 
+def _load_dotenv(dotenv_path: str | None = None) -> None:
+    if dotenv_path is None:
+        dotenv_path = os.environ.get("RAG_DOTENV", ".env")
+
+    env_file = Path(dotenv_path)
+    if not env_file.exists():
+        return
+
+    with open(env_file, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip()
+            if value.startswith('"') and value.endswith('"'):
+                value = value[1:-1]
+            elif value.startswith("'") and value.endswith("'"):
+                value = value[1:-1]
+            if key and key not in os.environ:
+                os.environ[key] = value
+
+
 def load_config(config_path: str | None = None) -> AppConfig:
+    _load_dotenv()
+
     if config_path is None:
         config_path = os.environ.get("RAG_CONFIG", "config/example.yaml")
 
