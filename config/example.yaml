@@ -16,6 +16,11 @@ rag:
   top_k: 5
   embedding: "ollama"
   ollama_embedding_model: "bge-m3"
+  ollama_base_url: "http://localhost:11434"
+  milvus_uri: ""
+  milvus_collection: "rag_chunks"
+  dense_weight: 0.6
+  keyword_weight: 0.4
 
 agent:
   refuse_when_no_context: true
@@ -31,3 +36,8 @@ agent:
 ui:
   show_citations: true
   title: "多源文档智能问答 Agent"
+
+session:
+  storage_dir: "./storage/sessions"
+  compress_trigger_messages: 50
+  compress_keep_messages: 20

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import re
 import time
 from typing import Any, AsyncGenerator, Literal
 
@@ -27,17 +26,15 @@ class Citation(BaseModel):
 class GraphState(BaseModel):
     question: str = ""
     rewritten_question: str = ""
+    session_id: str = ""
     conversation_history: list[dict[str, str]] = Field(default_factory=list)
 
     # retrieve
     retrieved_chunks: list[RetrievalResult] = Field(default_factory=list)
 
-    # rerank
-    reranked_chunks: list[RetrievalResult] = Field(default_factory=list)
+    # think
     context_text: str = ""
     citations: list[Citation] = Field(default_factory=list)
-
-    # think
     thinking: str = ""
     thinking_ms: int = 0
     should_answer: bool = True
@@ -86,71 +83,12 @@ def create_rag_graph(config: AppConfig, pipeline: RAGPipeline) -> StateGraph:
 
     def retrieve_node(state: GraphState) -> dict[str, Any]:
         query = state.rewritten_question or state.question
-        results = pipeline.retrieve(query, top_k=config.rag.top_k * 2)
+        results = pipeline.retrieve(query, top_k=config.rag.top_k)
         return {"retrieved_chunks": results}
-
-    def rerank_node(state: GraphState) -> dict[str, Any]:
-        chunks = state.retrieved_chunks
-        if not chunks:
-            return {"reranked_chunks": [], "context_text": "", "citations": []}
-
-        query = (state.rewritten_question or state.question).lower()
-        query_unigrams = set(re.findall(r'[\u4e00-\u9fff]|[a-z]+|[0-9]+', query))
-        query_bigrams = set()
-        chars = re.findall(r'[\u4e00-\u9fff]', query)
-        for i in range(len(chars) - 1):
-            query_bigrams.add(chars[i] + chars[i + 1])
-        query_words = set(re.findall(r'[a-z]+|[0-9]+', query))
-
-        scored: list[tuple[float, RetrievalResult]] = []
-        for r in chunks:
-            doc_text = r.chunk.content.lower()
-
-            unigrams = set(re.findall(r'[\u4e00-\u9fff]|[a-z]+|[0-9]+', doc_text))
-            bigrams = set()
-            doc_chars = re.findall(r'[\u4e00-\u9fff]', doc_text)
-            for i in range(len(doc_chars) - 1):
-                bigrams.add(doc_chars[i] + doc_chars[i + 1])
-            doc_words = set(re.findall(r'[a-z]+|[0-9]+', doc_text))
-
-            uni_overlap = len(query_unigrams & unigrams) / max(len(query_unigrams), 1)
-            bi_overlap = len(query_bigrams & bigrams) / max(len(query_bigrams), 1)
-            word_overlap = len(query_words & doc_words) / max(len(query_words), 1)
-
-            text_score = 0.2 * uni_overlap + 0.5 * bi_overlap + 0.3 * word_overlap
-            combined = 0.6 * r.score + 0.4 * text_score
-            scored.append((combined, r))
-
-        scored.sort(key=lambda x: x[0], reverse=True)
-        top = scored[: config.rag.top_k]
-
-        citations: list[Citation] = []
-        context_parts: list[str] = []
-        for i, (score, r) in enumerate(top, 1):
-            source = r.chunk.source
-            doc_name = r.chunk.metadata.get("document_name", source)
-            section = r.chunk.metadata.get("section", "")
-            snippet = r.chunk.content[:400]
-            section_label = f" > {section}" if section else ""
-            context_parts.append(f"[{i}] 来源: {doc_name}{section_label}\n{snippet}")
-            citations.append(Citation(
-                index=i,
-                source=source,
-                document_name=doc_name,
-                section=section,
-                snippet=r.chunk.content[:200],
-                score=round(score, 4),
-            ))
-
-        return {
-            "reranked_chunks": [r for _, r in top],
-            "context_text": "\n\n".join(context_parts),
-            "citations": citations,
-        }
 
     def think_node(state: GraphState) -> dict[str, Any]:
         t0 = time.time()
-        chunks = state.reranked_chunks
+        chunks = state.retrieved_chunks
 
         if not chunks or (chunks and chunks[0].score < 0.2):
             if config.agent.refuse_when_no_context:
@@ -169,12 +107,31 @@ def create_rag_graph(config: AppConfig, pipeline: RAGPipeline) -> StateGraph:
                     "follow_up_hint": "您可以尝试换一种方式提问，或上传相关文档到知识库。",
                 }
 
-        top_sources = [c.source for c in state.citations[:3]]
-        top_scores = [f"[{c.index}]{c.document_name}" + (f" > {c.section}" if c.section else "") + f"({c.score:.3f})" for c in state.citations[:3]]
+        citations: list[Citation] = []
+        context_parts: list[str] = []
+        for i, r in enumerate(chunks, 1):
+            source = r.chunk.source
+            doc_name = r.chunk.metadata.get("document_name", source)
+            section = r.chunk.metadata.get("section", "")
+            snippet = r.chunk.content[:400]
+            section_label = f" > {section}" if section else ""
+            context_parts.append(f"[{i}] 来源: {doc_name}{section_label}\n{snippet}")
+            citations.append(Citation(
+                index=i,
+                source=source,
+                document_name=doc_name,
+                section=section,
+                snippet=r.chunk.content[:200],
+                score=round(r.score, 4),
+            ))
+
+        top_scores = [
+            f"[{c.index}]{c.document_name}" + (f" > {c.section}" if c.section else "") + f"({c.score:.3f})"
+            for c in citations[:3]
+        ]
         thinking = (
             f"分析用户问题: 「{state.question}」\n\n"
-            f"检索与重排序: 从向量库召回 {len(state.retrieved_chunks)} 个文本块，"
-            f"经关键词重排序后选取 Top-{len(chunks)} 个最相关结果。\n\n"
+            f"检索与融合: 通过 Dense+BM25 混合检索召回 {len(chunks)} 个文本块。\n\n"
             f"最相关来源:\n"
         )
         for ts in top_scores:
@@ -186,6 +143,8 @@ def create_rag_graph(config: AppConfig, pipeline: RAGPipeline) -> StateGraph:
             "thinking_ms": int((time.time() - t0) * 1000),
             "should_answer": True,
             "has_context": True,
+            "context_text": "\n\n".join(context_parts),
+            "citations": citations,
         }
 
     def generate_node(state: GraphState) -> dict[str, Any]:
@@ -228,14 +187,12 @@ def create_rag_graph(config: AppConfig, pipeline: RAGPipeline) -> StateGraph:
     builder = StateGraph(GraphState)
     builder.add_node("rewrite", rewrite_node)
     builder.add_node("retrieve", retrieve_node)
-    builder.add_node("rerank", rerank_node)
     builder.add_node("think", think_node)
     builder.add_node("generate", generate_node)
 
     builder.add_edge(START, "rewrite")
     builder.add_edge("rewrite", "retrieve")
-    builder.add_edge("retrieve", "rerank")
-    builder.add_edge("rerank", "think")
+    builder.add_edge("retrieve", "think")
     builder.add_conditional_edges("think", route_after_think)
     builder.add_edge("generate", END)
 

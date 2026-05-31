@@ -28,6 +28,10 @@ class RAGConfig(BaseModel):
     embedding: str = "ollama"
     ollama_embedding_model: str = "bge-m3"
     ollama_base_url: str = "http://localhost:11434"
+    milvus_uri: str = ""
+    milvus_collection: str = "rag_chunks"
+    dense_weight: float = 0.6
+    keyword_weight: float = 0.4
 
 
 class LLMConfig(BaseModel):
@@ -54,11 +58,18 @@ class UIConfig(BaseModel):
     title: str = "多源文档智能问答 Agent"
 
 
+class SessionConfig(BaseModel):
+    storage_dir: str = "./storage/sessions"
+    compress_trigger_messages: int = 50
+    compress_keep_messages: int = 20
+
+
 class AppConfig(BaseModel):
     sources: SourcesConfig = Field(default_factory=SourcesConfig)
     rag: RAGConfig = Field(default_factory=RAGConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     ui: UIConfig = Field(default_factory=UIConfig)
+    session: SessionConfig = Field(default_factory=SessionConfig)
 
 
 def _load_dotenv(dotenv_path: str | None = None) -> None:

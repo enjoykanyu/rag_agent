@@ -13,6 +13,7 @@ from src.agent.graph import create_rag_graph
 from src.agent.streaming import StreamingRAGAgent
 from src.config import AppConfig, load_config
 from src.pipeline.rag_pipeline import RAGPipeline
+from src.session_manager import SessionManager
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +23,7 @@ BASE_DIR = Path(__file__).resolve().parent
 def create_app(config_path: str | None = None) -> FastAPI:
     config = load_config(config_path)
 
-    app = FastAPI(title=config.ui.title, version="2.0.0")
+    app = FastAPI(title=config.ui.title, version="3.0.0")
 
     static_dir = BASE_DIR / "static"
     if static_dir.exists():
@@ -30,7 +31,8 @@ def create_app(config_path: str | None = None) -> FastAPI:
 
     pipeline = RAGPipeline(config)
     graph = create_rag_graph(config, pipeline)
-    agent = StreamingRAGAgent(graph, config)
+    session_manager = SessionManager(storage_dir=config.session.storage_dir)
+    agent = StreamingRAGAgent(graph, config, session_manager)
 
     chunk_count = pipeline.index_local()
     logger.info("Initial index: %d chunks from local documents", chunk_count)
@@ -41,12 +43,12 @@ def create_app(config_path: str | None = None) -> FastAPI:
         return template_path.read_text(encoding="utf-8")
 
     @app.post("/api/ask")
-    async def ask_question(question: str = Form(...)):
+    async def ask_question(question: str = Form(...), session_id: str = Form("default")):
         if not question.strip():
             return JSONResponse({"error": "问题不能为空"}, status_code=400)
 
         async def event_generator():
-            async for event in agent.ask_stream(question):
+            async for event in agent.ask_stream(question, session_id=session_id):
                 yield event
 
         return StreamingResponse(
@@ -75,12 +77,13 @@ def create_app(config_path: str | None = None) -> FastAPI:
     async def reindex():
         pipeline.store.clear()
         pipeline._documents.clear()
+        pipeline._all_chunks.clear()
         count = pipeline.index_local()
         return JSONResponse({"message": f"重新索引完成，共 {count} 个文本块", "chunks": count})
 
     @app.post("/api/reset")
-    async def reset_conversation():
-        agent.reset_conversation()
+    async def reset_conversation(session_id: str = "default"):
+        agent.reset_conversation(session_id)
         return JSONResponse({"message": "对话已重置"})
 
     @app.get("/api/status")
@@ -91,7 +94,34 @@ def create_app(config_path: str | None = None) -> FastAPI:
             "embedding": config.rag.embedding,
             "llm_model": config.agent.llm.model,
             "llm_configured": bool(config.agent.llm.api_key),
+            "milvus_enabled": bool(config.rag.milvus_uri),
         })
+
+    @app.post("/api/sessions")
+    async def create_session(title: str = "新会话"):
+        record = session_manager.create_session(title=title)
+        return JSONResponse(record)
+
+    @app.get("/api/sessions")
+    async def list_sessions():
+        sessions = session_manager.list_sessions()
+        return JSONResponse(sessions)
+
+    @app.get("/api/sessions/{session_id}")
+    async def get_session(session_id: str):
+        info = session_manager.get_session_info(session_id)
+        return JSONResponse(info)
+
+    @app.delete("/api/sessions/{session_id}")
+    async def delete_session(session_id: str):
+        session_manager.delete_session(session_id)
+        agent.reset_conversation(session_id)
+        return JSONResponse({"message": "会话已删除"})
+
+    @app.put("/api/sessions/{session_id}/title")
+    async def rename_session(session_id: str, title: str = Form(...)):
+        record = session_manager.rename_session(session_id, title)
+        return JSONResponse(record)
 
     return app
 
