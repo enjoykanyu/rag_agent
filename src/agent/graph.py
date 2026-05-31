@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 import time
@@ -27,6 +26,7 @@ class Citation(BaseModel):
 
 class GraphState(BaseModel):
     question: str = ""
+    rewritten_question: str = ""
     conversation_history: list[dict[str, str]] = Field(default_factory=list)
 
     # retrieve
@@ -53,8 +53,40 @@ class GraphState(BaseModel):
 
 def create_rag_graph(config: AppConfig, pipeline: RAGPipeline) -> StateGraph:
 
+    def rewrite_node(state: GraphState) -> dict[str, Any]:
+        if not state.conversation_history:
+            return {"rewritten_question": state.question}
+
+        history_lines: list[str] = []
+        for msg in state.conversation_history[-6:]:
+            role = "用户" if msg["role"] == "user" else "助手"
+            history_lines.append(f"{role}: {msg['content']}")
+        history_text = "\n".join(history_lines)
+
+        rewrite_prompt = (
+            f"以下是一段对话历史:\n{history_text}\n\n"
+            f"用户最新问题: {state.question}\n\n"
+            f"请将用户最新问题改写为一个独立、完整、自包含的问题，使其不需要对话历史也能被理解。"
+            f"只输出改写后的问题，不要解释，不要加引号。"
+            f"如果问题本身已经完整，直接原样输出。"
+        )
+
+        rewritten = _call_llm_sync(
+            config,
+            "你是一个查询改写助手，擅长将依赖上下文的简短问题改写为完整独立的问题。",
+            rewrite_prompt,
+            [],
+        ).strip()
+
+        if not rewritten:
+            rewritten = state.question
+
+        logger.info("Query rewrite: '%s' -> '%s'", state.question, rewritten)
+        return {"rewritten_question": rewritten}
+
     def retrieve_node(state: GraphState) -> dict[str, Any]:
-        results = pipeline.retrieve(state.question, top_k=config.rag.top_k * 2)
+        query = state.rewritten_question or state.question
+        results = pipeline.retrieve(query, top_k=config.rag.top_k * 2)
         return {"retrieved_chunks": results}
 
     def rerank_node(state: GraphState) -> dict[str, Any]:
@@ -62,7 +94,7 @@ def create_rag_graph(config: AppConfig, pipeline: RAGPipeline) -> StateGraph:
         if not chunks:
             return {"reranked_chunks": [], "context_text": "", "citations": []}
 
-        query = state.question.lower()
+        query = (state.rewritten_question or state.question).lower()
         query_unigrams = set(re.findall(r'[\u4e00-\u9fff]|[a-z]+|[0-9]+', query))
         query_bigrams = set()
         chars = re.findall(r'[\u4e00-\u9fff]', query)
@@ -86,7 +118,7 @@ def create_rag_graph(config: AppConfig, pipeline: RAGPipeline) -> StateGraph:
             word_overlap = len(query_words & doc_words) / max(len(query_words), 1)
 
             text_score = 0.2 * uni_overlap + 0.5 * bi_overlap + 0.3 * word_overlap
-            combined = 0.35 * r.score + 0.65 * text_score
+            combined = 0.6 * r.score + 0.4 * text_score
             scored.append((combined, r))
 
         scored.sort(key=lambda x: x[0], reverse=True)
@@ -120,7 +152,7 @@ def create_rag_graph(config: AppConfig, pipeline: RAGPipeline) -> StateGraph:
         t0 = time.time()
         chunks = state.reranked_chunks
 
-        if not chunks or (chunks and chunks[0].score < 0.3):
+        if not chunks or (chunks and chunks[0].score < 0.2):
             if config.agent.refuse_when_no_context:
                 thinking = (
                     f"分析用户问题: 「{state.question}」\n\n"
@@ -194,12 +226,14 @@ def create_rag_graph(config: AppConfig, pipeline: RAGPipeline) -> StateGraph:
         return END
 
     builder = StateGraph(GraphState)
+    builder.add_node("rewrite", rewrite_node)
     builder.add_node("retrieve", retrieve_node)
     builder.add_node("rerank", rerank_node)
     builder.add_node("think", think_node)
     builder.add_node("generate", generate_node)
 
-    builder.add_edge(START, "retrieve")
+    builder.add_edge(START, "rewrite")
+    builder.add_edge("rewrite", "retrieve")
     builder.add_edge("retrieve", "rerank")
     builder.add_edge("rerank", "think")
     builder.add_conditional_edges("think", route_after_think)

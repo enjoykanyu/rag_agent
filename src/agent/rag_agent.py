@@ -36,7 +36,8 @@ class RAGAgent:
         self._conversation_history: list[dict[str, str]] = []
 
     def ask(self, question: str) -> AgentResponse:
-        results = self.pipeline.retrieve(question)
+        query = self._rewrite_query(question)
+        results = self.pipeline.retrieve(query)
 
         if not results or results[0].score < 0.15:
             if self.config.agent.refuse_when_no_context:
@@ -67,6 +68,47 @@ class RAGAgent:
             has_context=True,
             follow_up_hint=follow_up,
         )
+
+    def _rewrite_query(self, question: str) -> str:
+        if not self._conversation_history:
+            return question
+
+        history_lines: list[str] = []
+        for msg in self._conversation_history[-6:]:
+            role = "用户" if msg["role"] == "user" else "助手"
+            history_lines.append(f"{role}: {msg['content']}")
+        history_text = "\n".join(history_lines)
+
+        rewrite_prompt = (
+            f"以下是一段对话历史:\n{history_text}\n\n"
+            f"用户最新问题: {question}\n\n"
+            f"请将用户最新问题改写为一个独立、完整、自包含的问题，使其不需要对话历史也能被理解。"
+            f"只输出改写后的问题，不要解释，不要加引号。"
+            f"如果问题本身已经完整，直接原样输出。"
+        )
+
+        llm_cfg = self.config.agent.llm
+        if llm_cfg.provider == "openai" and llm_cfg.api_key:
+            try:
+                from openai import OpenAI
+                client = OpenAI(api_key=llm_cfg.api_key, base_url=llm_cfg.base_url or None)
+                response = client.chat.completions.create(
+                    model=llm_cfg.model,
+                    messages=[
+                        {"role": "system", "content": "你是一个查询改写助手，擅长将依赖上下文的简短问题改写为完整独立的问题。"},
+                        {"role": "user", "content": rewrite_prompt},
+                    ],
+                    temperature=0.1,
+                    max_tokens=128,
+                )
+                rewritten = (response.choices[0].message.content or "").strip()
+                if rewritten:
+                    logger.info("Query rewrite: '%s' -> '%s'", question, rewritten)
+                    return rewritten
+            except Exception as e:
+                logger.error("Query rewrite LLM call failed: %s", e)
+
+        return question
 
     def _build_context(self, results: list[RetrievalResult]) -> str:
         parts: list[str] = []

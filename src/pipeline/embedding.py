@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import logging
 import re
 from collections import Counter
@@ -22,6 +21,8 @@ class OllamaEmbeddingProvider:
     def __init__(self, model: str = "bge-m3", base_url: str = "http://localhost:11434"):
         self.model = model
         self.base_url = base_url.rstrip("/")
+        self._fallback_count = 0
+        self._mock_provider: MockEmbeddingProvider | None = None
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         results: list[list[float]] = []
@@ -46,13 +47,18 @@ class OllamaEmbeddingProvider:
         return results
 
     def _fallback_embedding(self, text: str) -> list[float]:
-        h = hashlib.sha256(text.encode("utf-8")).digest()
-        rng = np.random.RandomState(int.from_bytes(h[:4], "little"))
-        vec = rng.randn(1024).astype(np.float32)
-        norm = np.linalg.norm(vec)
-        if norm > 0:
-            vec = vec / norm
-        return vec.tolist()
+        self._fallback_count += 1
+        if self._fallback_count == 1:
+            logger.warning(
+                "Ollama embedding is unavailable! Falling back to TF-IDF mock embeddings. "
+                "This will significantly reduce retrieval quality. "
+                "Please ensure Ollama is running at %s with model '%s' pulled.",
+                self.base_url,
+                self.model,
+            )
+        if self._mock_provider is None:
+            self._mock_provider = MockEmbeddingProvider(dim=256)
+        return self._mock_provider.embed([text])[0]
 
 
 class MockEmbeddingProvider:
