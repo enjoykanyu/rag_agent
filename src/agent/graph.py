@@ -4,6 +4,7 @@ import logging
 import time
 from typing import Any, AsyncGenerator, Literal
 
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
 
@@ -152,23 +153,18 @@ def create_rag_graph(config: AppConfig, pipeline: RAGPipeline) -> StateGraph:
             return {}
 
         system = config.agent.system_prompt
-        history_text = ""
-        if state.conversation_history:
-            parts: list[str] = []
-            for msg in state.conversation_history[-4:]:
-                role = "用户" if msg["role"] == "user" else "助手"
-                parts.append(f"{role}: {msg['content']}")
-            history_text = f"\n\n对话历史:\n{''.join(parts)}"
+        query = state.rewritten_question or state.question
 
         prompt = (
             f"以下是检索到的上下文内容:\n\n{state.context_text}\n\n"
             f"请严格根据以上上下文回答问题。要求:\n"
             f"1. 使用 Markdown 格式组织回答，包括标题(##/###)、列表、代码块、表格等\n"
             f"2. 回答要准确、完整，结构清晰，直接回答问题\n"
-            f"3. 在相关事实后标注引用来源编号，格式如 [1] [2]，引用标记放在句末\n"
-            f"4. 代码示例使用 ```language 代码块格式\n"
-            f"5. 如果上下文中没有足够信息，请明确说明\n\n"
-            f"问题: {state.question}{history_text}"
+            f"3. 只回答与问题直接相关的内容，不要回答问题未涉及的其他信息\n"
+            f"4. 在相关事实后标注引用来源编号，格式如 [1] [2]，引用标记放在句末\n"
+            f"5. 代码示例使用 ```language 代码块格式\n"
+            f"6. 如果上下文中没有足够信息，请明确说明\n\n"
+            f"问题: {query}"
         )
 
         answer = _call_llm_sync(config, system, prompt, state.conversation_history)
@@ -196,7 +192,8 @@ def create_rag_graph(config: AppConfig, pipeline: RAGPipeline) -> StateGraph:
     builder.add_conditional_edges("think", route_after_think)
     builder.add_edge("generate", END)
 
-    return builder.compile()
+    checkpointer = InMemorySaver()
+    return builder.compile(checkpointer=checkpointer)
 
 
 def _call_llm_sync(config: AppConfig, system: str, prompt: str, history: list[dict[str, str]]) -> str:
@@ -205,8 +202,10 @@ def _call_llm_sync(config: AppConfig, system: str, prompt: str, history: list[di
         try:
             from openai import OpenAI
             client = OpenAI(api_key=llm_cfg.api_key, base_url=llm_cfg.base_url or None)
-            messages = [{"role": "system", "content": system}]
-            messages.extend(history)
+            messages: list[dict[str, str]] = [{"role": "system", "content": system}]
+            for msg in history:
+                if msg.get("role") in ("user", "assistant") and msg.get("content"):
+                    messages.append({"role": msg["role"], "content": msg["content"]})
             messages.append({"role": "user", "content": prompt})
             response = client.chat.completions.create(
                 model=llm_cfg.model,
@@ -229,8 +228,10 @@ async def stream_llm_answer(
         try:
             from openai import AsyncOpenAI
             client = AsyncOpenAI(api_key=llm_cfg.api_key, base_url=llm_cfg.base_url or None)
-            messages = [{"role": "system", "content": system}]
-            messages.extend(history)
+            messages: list[dict[str, str]] = [{"role": "system", "content": system}]
+            for msg in history:
+                if msg.get("role") in ("user", "assistant") and msg.get("content"):
+                    messages.append({"role": msg["role"], "content": msg["content"]})
             messages.append({"role": "user", "content": prompt})
             stream = await client.chat.completions.create(
                 model=llm_cfg.model,
@@ -259,8 +260,6 @@ def _fallback_answer(prompt: str) -> str:
         return "知识库中未找到相关信息。"
     context = context_section[1].split("请严格根据以上上下文回答问题")[0]
     question_part = prompt.split("问题:")[-1].strip() if "问题:" in prompt else ""
-    if "对话历史:" in question_part:
-        question_part = question_part.split("对话历史:")[0].strip()
 
     sources: list[str] = []
     content_lines: list[str] = []

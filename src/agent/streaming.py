@@ -42,8 +42,10 @@ class StreamingRAGAgent:
 
         self._append_history(session_id, "user", question)
 
+        run_config = {"configurable": {"thread_id": session_id}}
+
         try:
-            final_state = await self.graph.ainvoke(state.model_dump())
+            final_state = await self.graph.ainvoke(state.model_dump(), config=run_config)
 
             citations = []
             for c in final_state.get("citations", []):

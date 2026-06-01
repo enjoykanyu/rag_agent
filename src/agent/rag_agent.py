@@ -41,8 +41,11 @@ class RAGAgent:
 
         if not results or results[0].score < 0.15:
             if self.config.agent.refuse_when_no_context:
+                self._conversation_history.append({"role": "user", "content": question})
+                no_context_msg = "知识库中未找到相关信息，无法回答该问题。"
+                self._conversation_history.append({"role": "assistant", "content": no_context_msg})
                 return AgentResponse(
-                    answer="知识库中未找到相关信息，无法回答该问题。",
+                    answer=no_context_msg,
                     has_context=False,
                     follow_up_hint="您可以尝试换一种方式提问，或上传相关文档到知识库。",
                 )
@@ -50,11 +53,12 @@ class RAGAgent:
         context_text = self._build_context(results)
         citations = self._build_citations(results)
 
-        prompt = self._build_prompt(question, context_text)
+        prompt = self._build_prompt(query, context_text)
 
+        history_snapshot = list(self._conversation_history)
         self._conversation_history.append({"role": "user", "content": question})
 
-        answer = self._call_llm(prompt)
+        answer = self._call_llm(prompt, history_snapshot)
 
         self._conversation_history.append({"role": "assistant", "content": answer})
 
@@ -136,34 +140,25 @@ class RAGAgent:
             )
         return citations
 
-    def _build_prompt(self, question: str, context: str) -> str:
-        system = self.config.agent.system_prompt
-
-        history_text = ""
-        if self._conversation_history:
-            history_parts: list[str] = []
-            for msg in self._conversation_history[-4:]:
-                role = "用户" if msg["role"] == "user" else "助手"
-                history_parts.append(f"{role}: {msg['content']}")
-            history_text = f"\n\n对话历史:\n{''.join(history_parts)}"
-
+    def _build_prompt(self, query: str, context: str) -> str:
         return (
-            f"{system}\n\n"
             f"以下是检索到的上下文内容:\n\n{context}\n\n"
-            f"请根据以上上下文回答问题。如果上下文中没有相关信息，请明确说明。"
-            f"回答时请标注引用来源编号。\n\n"
-            f"问题: {question}{history_text}"
+            f"请根据以上上下文回答问题。要求:\n"
+            f"1. 只回答与问题直接相关的内容，不要回答问题未涉及的其他信息\n"
+            f"2. 如果上下文中没有相关信息，请明确说明\n"
+            f"3. 回答时请标注引用来源编号\n\n"
+            f"问题: {query}"
         )
 
-    def _call_llm(self, prompt: str) -> str:
+    def _call_llm(self, prompt: str, history: list[dict[str, str]]) -> str:
         llm_cfg = self.config.agent.llm
 
         if llm_cfg.provider == "openai" and llm_cfg.api_key:
-            return self._call_openai(prompt)
+            return self._call_openai(prompt, history)
         else:
             return self._mock_answer(prompt)
 
-    def _call_openai(self, prompt: str) -> str:
+    def _call_openai(self, prompt: str, history: list[dict[str, str]]) -> str:
         try:
             from openai import OpenAI
 
@@ -171,11 +166,13 @@ class RAGAgent:
                 api_key=self.config.agent.llm.api_key,
                 base_url=self.config.agent.llm.base_url or None,
             )
-            messages = [
+            messages: list[dict[str, str]] = [
                 {"role": "system", "content": self.config.agent.system_prompt},
-                *self._conversation_history,
-                {"role": "user", "content": prompt},
             ]
+            for msg in history:
+                if msg.get("role") in ("user", "assistant") and msg.get("content"):
+                    messages.append({"role": msg["role"], "content": msg["content"]})
+            messages.append({"role": "user", "content": prompt})
             response = client.chat.completions.create(
                 model=self.config.agent.llm.model,
                 messages=messages,
