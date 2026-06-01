@@ -101,20 +101,63 @@
         }
 
         .header-btn {
-            padding: 6px 12px;
+            padding: 6px 14px;
             border: 1px solid var(--border);
-            border-radius: 8px;
+            border-radius: 10px;
             background: var(--bg-elevated);
             color: var(--text-secondary);
             font-size: 12px;
+            font-weight: 500;
             cursor: pointer;
-            transition: all 0.2s;
+            transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
             font-family: inherit;
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .header-btn::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(135deg, rgba(0,113,227,0.08) 0%, rgba(0,113,227,0.02) 100%);
+            opacity: 0;
+            transition: opacity 0.25s ease;
         }
 
         .header-btn:hover {
-            background: var(--bg-hover);
-            border-color: var(--border-light);
+            border-color: rgba(0,113,227,0.3);
+            color: var(--accent);
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(0,113,227,0.12), 0 1px 3px rgba(0,0,0,0.04);
+        }
+
+        .header-btn:hover::before {
+            opacity: 1;
+        }
+
+        .header-btn:active {
+            transform: translateY(0);
+            box-shadow: 0 1px 3px rgba(0,113,227,0.08);
+        }
+
+        .header-btn.primary {
+            background: var(--accent);
+            color: white;
+            border-color: var(--accent);
+        }
+
+        .header-btn.primary:hover {
+            background: var(--accent-hover);
+            border-color: var(--accent-hover);
+            color: white;
+            box-shadow: 0 4px 14px rgba(0,113,227,0.3), 0 1px 3px rgba(0,0,0,0.06);
+        }
+
+        .header-btn.primary::before {
+            background: linear-gradient(135deg, rgba(255,255,255,0.15) 0%, rgba(255,255,255,0) 100%);
         }
 
         /* Chat Area */
@@ -708,34 +751,128 @@
 
         .upload-modal {
             background: var(--bg-elevated);
-            border-radius: var(--radius-lg);
-            padding: 24px;
-            width: 360px;
-            box-shadow: var(--shadow-card);
+            border-radius: 20px;
+            padding: 28px;
+            width: 400px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.15), 0 8px 24px rgba(0,0,0,0.08);
+            animation: modalPop 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+        }
+
+        @keyframes modalPop {
+            from { opacity: 0; transform: scale(0.92) translateY(10px); }
+            to { opacity: 1; transform: scale(1) translateY(0); }
         }
 
         .upload-modal h3 {
-            font-size: 15px;
+            font-size: 17px;
             font-weight: 600;
-            margin-bottom: 12px;
+            margin-bottom: 4px;
+            color: var(--text);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .upload-modal .modal-subtitle {
+            font-size: 13px;
+            color: var(--text-muted);
+            margin-bottom: 20px;
         }
 
         .upload-dropzone {
+            display: block;
             border: 2px dashed var(--border);
-            border-radius: var(--radius);
-            padding: 32px;
+            border-radius: 16px;
+            padding: 40px 32px;
             text-align: center;
             cursor: pointer;
-            transition: all 0.2s;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            background: linear-gradient(180deg, rgba(0,113,227,0.02) 0%, rgba(0,113,227,0) 100%);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .upload-dropzone::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            border-radius: 16px;
+            background: radial-gradient(circle at center, rgba(0,113,227,0.06) 0%, transparent 70%);
+            opacity: 0;
+            transition: opacity 0.3s ease;
         }
 
         .upload-dropzone:hover {
             border-color: var(--accent);
-            background: var(--accent-light);
+            background: linear-gradient(180deg, rgba(0,113,227,0.06) 0%, rgba(0,113,227,0.02) 100%);
+            transform: translateY(-2px);
+            box-shadow: 0 8px 24px rgba(0,113,227,0.1);
+        }
+
+        .upload-dropzone:hover::before {
+            opacity: 1;
+        }
+
+        .upload-dropzone:active {
+            transform: translateY(0);
+            box-shadow: 0 2px 8px rgba(0,113,227,0.06);
         }
 
         .upload-dropzone input {
             display: none;
+        }
+
+        .upload-dropzone .upload-icon-wrap {
+            width: 64px;
+            height: 64px;
+            margin: 0 auto 16px;
+            background: linear-gradient(135deg, var(--accent-light) 0%, rgba(0,113,227,0.08) 100%);
+            border-radius: 18px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 28px;
+            transition: all 0.3s ease;
+            position: relative;
+            z-index: 1;
+        }
+
+        .upload-dropzone:hover .upload-icon-wrap {
+            transform: scale(1.08);
+            background: linear-gradient(135deg, rgba(0,113,227,0.12) 0%, rgba(0,113,227,0.06) 100%);
+        }
+
+        .upload-dropzone .upload-text {
+            font-size: 14px;
+            color: var(--text-secondary);
+            font-weight: 500;
+            position: relative;
+            z-index: 1;
+        }
+
+        .upload-dropzone .upload-hint {
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-top: 6px;
+            position: relative;
+            z-index: 1;
+        }
+
+        .upload-dropzone .upload-status {
+            font-size: 12px;
+            margin-top: 10px;
+            font-weight: 500;
+            min-height: 18px;
+            position: relative;
+            z-index: 1;
+        }
+
+        .upload-dropzone .upload-status.success {
+            color: var(--green);
+        }
+
+        .upload-dropzone .upload-status.error {
+            color: var(--red);
         }
     </style>
 </head>
@@ -792,12 +929,14 @@
     <!-- Upload Modal -->
     <div class="upload-overlay" id="uploadOverlay" onclick="hideUpload(event)">
         <div class="upload-modal" onclick="event.stopPropagation()">
-            <h3>上传文档到知识库</h3>
+            <h3>📎 上传文档到知识库</h3>
+            <div class="modal-subtitle">支持 Markdown 和纯文本文件</div>
             <label class="upload-dropzone">
                 <input type="file" id="fileUpload" accept=".md,.txt" onchange="uploadFile()" />
-                <div style="font-size: 32px; margin-bottom: 8px;">📄</div>
-                <div style="font-size: 13px; color: var(--text-secondary);">点击选择 .md / .txt 文件</div>
-                <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;" id="uploadStatus"></div>
+                <div class="upload-icon-wrap">📄</div>
+                <div class="upload-text">点击选择 .md / .txt 文件</div>
+                <div class="upload-hint">或将文件拖拽到此处</div>
+                <div class="upload-status" id="uploadStatus"></div>
             </label>
         </div>
     </div>
@@ -1257,21 +1396,26 @@
             formData.append('file', input.files[0]);
 
             statusEl.textContent = '上传中...';
+            statusEl.className = 'upload-status';
             try {
                 const res = await fetch('/api/upload', { method: 'POST', body: formData });
                 const data = await res.json();
                 if (res.ok) {
                     statusEl.textContent = `✓ ${data.message}`;
+                    statusEl.className = 'upload-status success';
                     setTimeout(() => {
                         document.getElementById('uploadOverlay').classList.remove('active');
                         statusEl.textContent = '';
+                        statusEl.className = 'upload-status';
                         input.value = '';
                     }, 1500);
                 } else {
                     statusEl.textContent = `✗ ${data.error}`;
+                    statusEl.className = 'upload-status error';
                 }
             } catch (e) {
                 statusEl.textContent = '✗ 上传失败';
+                statusEl.className = 'upload-status error';
             }
             loadStatus();
         }
